@@ -3,7 +3,6 @@ from typing import List
 
 from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import select, desc
 from sqlmodel.ext.asyncio.session import AsyncSession
 from tenacity import (
     retry,
@@ -17,11 +16,17 @@ from models import Message
 from whatsapp import WhatsAppClient
 from whatsapp.jid import parse_jid
 from utils.chat_text import chat2text
+from utils.context import build_context_window
+from utils.conversation_digest import get_conversation_digest
 from utils.opt_out import get_opt_out_map
 from utils.voyage_embed_text import voyage_embed_text
 from .base_handler import BaseHandler
 from config import Settings
 from services.prompt_manager import prompt_manager
+from tools.web_search import web_search
+from tools.weather import get_weather
+from tools.scraper import scrape_url
+from tools.datetime_tool import get_current_datetime
 
 
 # Creating an object
@@ -44,15 +49,12 @@ class KnowledgeBaseAnswers(BaseHandler):
         if message.text is None:
             logger.warning(f"Received message with no text from {message.sender_jid}")
             return
-        # get the last 7 messages
-        stmt = (
-            select(Message)
-            .where(Message.chat_jid == message.chat_jid)
-            .order_by(desc(Message.timestamp))
-            .limit(7)
-        )
-        res = await self.session.exec(stmt)
-        history: list[Message] = list(res.all())
+
+        my_jid = await self.whatsapp.get_my_jid()
+        bot_jid_str = my_jid.normalize_str()
+
+        # Build smart context: reply chain + token-budgeted recent messages
+        history = await build_context_window(self.session, message)
 
         # Get opt-out map
         all_jids = {m.sender_jid for m in history}
@@ -60,7 +62,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
 
         rephrased_result = await self.rephrasing_agent(
-            (await self.whatsapp.get_my_jid()).user, message, history, opt_out_map
+            my_jid.user, message, history, opt_out_map, bot_jid_str
         )
         # Get query embedding
         embedded_question = (
@@ -97,9 +99,16 @@ class KnowledgeBaseAnswers(BaseHandler):
             f"topic_distance: {r.vector_distance}" for r in search_results
         ]
 
+        # Generate ambient conversation digest (cached, cheap model)
+        context_ids = {m.message_id for m in history}
+        digest = await get_conversation_digest(
+            self.session, message, self.settings.model_name, context_ids, bot_jid_str
+        )
+
         sender_number = parse_jid(message.sender_jid).user
         generation_result = await self.generation_agent(
-            message.text, formatted_topics, message.sender_jid, history, opt_out_map
+            message.text, formatted_topics, message.sender_jid, history, opt_out_map,
+            bot_jid_str, digest,
         )
         logger.info(
             "RAG Query Results:\n"
@@ -116,8 +125,36 @@ class KnowledgeBaseAnswers(BaseHandler):
         await self.send_message(
             message.chat_jid,
             generation_result.output,
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
         )
+
+    def _register_tools(self, agent: Agent) -> None:
+        """Register web tools on the agent so the LLM can call them autonomously."""
+        settings = self.settings
+
+        @agent.tool_plain
+        async def search_web(query: str) -> str:
+            """Search the web for current information. Use when the knowledge base doesn't have the answer, or for real-time questions about news, events, etc."""
+            if not settings.tavily_api_key:
+                return "חיפוש אינטרנט לא זמין כרגע."
+            return await web_search(query, settings.tavily_api_key)
+
+        @agent.tool_plain
+        async def weather(location: str) -> str:
+            """Get current weather for a location. Use when the user asks about weather conditions."""
+            return await get_weather(location)
+
+        @agent.tool_plain
+        async def read_url(url: str) -> str:
+            """Read and extract content from a URL. Use when the user shares a link and asks to summarize or read it."""
+            if not settings.firecrawl_api_key:
+                return "קריאת קישורים לא זמינה כרגע."
+            return await scrape_url(url, settings.firecrawl_api_key)
+
+        @agent.tool_plain
+        def current_datetime() -> str:
+            """Get the current date and time in Israel timezone. Use when the user asks about the current time or date."""
+            return get_current_datetime()
 
     @retry(
         wait=wait_random_exponential(min=1, max=30),
@@ -132,24 +169,30 @@ class KnowledgeBaseAnswers(BaseHandler):
         sender: str,
         history: List[Message],
         opt_out_map: dict[str, str],
+        bot_jid: str | None = None,
+        digest: str = "",
     ) -> AgentRunResult[str]:
         agent = Agent(
-            model=self.settings.model_name,
+            model=self.settings.generation_model_name,
             system_prompt=prompt_manager.render("rag.j2"),
         )
+        self._register_tools(agent)
 
         sender_user = parse_jid(sender).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
 
-        prompt_template = f"""
-        {sender_display}: {query}
-        
-        # Recent chat history:
-        {chat2text(history, opt_out_map)}
-        
-        # Related Topics:
-        {topics}
-        """
+        digest_section = ""
+        if digest:
+            digest_section = (
+                f"\n\n# Broader conversation context (what the group discussed recently):\n{digest}"
+            )
+
+        prompt_template = (
+            f"{sender_display}: {query}\n\n"
+            f"# Recent chat history:\n{chat2text(history, opt_out_map, bot_jid)}\n\n"
+            f"# Related Topics:\n{topics}"
+            f"{digest_section}"
+        )
 
         return await agent.run(prompt_template)
 
@@ -165,13 +208,13 @@ class KnowledgeBaseAnswers(BaseHandler):
         message: Message,
         history: List[Message],
         opt_out_map: dict[str, str],
+        bot_jid: str | None = None,
     ) -> AgentRunResult[str]:
         rephrased_agent = Agent(
             model=self.settings.model_name,
             system_prompt=prompt_manager.render("rephrase.j2", my_jid=my_jid),
         )
 
-        # We obviously need to translate the question and turn the question vebality to a title / summary text to make it closer to the questions in the rag
         return await rephrased_agent.run(
-            f"{message.text}\n\n## Recent chat history:\n {chat2text(history, opt_out_map)}"
+            f"{message.text}\n\n## Recent chat history:\n{chat2text(history, opt_out_map, bot_jid)}"
         )

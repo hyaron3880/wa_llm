@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -61,8 +63,8 @@ class BaseHandler:
         if isinstance(message, BaseMessage):
             message = Message(**message.model_dump())
 
-        if not message.text:
-            return message  # Don't store messages without text
+        if not message.text and not message.media_url:
+            return message  # Don't store messages without text or media
 
         async with self.session.begin_nested():
             # Ensure sender exists and is committed
@@ -173,6 +175,36 @@ class BaseHandler:
         stored_message = await self.store_message(Message(**new_message.model_dump()))
         assert stored_message, "Failed to store message"
         return stored_message
+
+    async def download_media(self, message: Message) -> tuple[bytes, str] | None:
+        """Download media from a WhatsApp message via the Go WhatsApp API.
+        Returns a tuple of (media_bytes, mime_type) or None on failure.
+        """
+        if not message.media_url:
+            return None
+        try:
+            raw = await self.whatsapp.download_message_media(
+                message.message_id, message.chat_jid
+            )
+            if not raw:
+                logger.warning(f"Empty media response for message {message.message_id}")
+                return None
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(
+                    f"Invalid JSON in media response for message {message.message_id}: {e}"
+                )
+                return None
+            results = data.get("results", {})
+            b64_data = results.get("data")
+            mime_type = results.get("mime_type", "application/octet-stream")
+            if b64_data:
+                return base64.b64decode(b64_data), mime_type
+            return None
+        except Exception as e:
+            logger.error(f"Failed to download media for message {message.message_id}: {e}")
+            return None
 
     async def upsert(self, model):
         return await upsert(self.session, model)

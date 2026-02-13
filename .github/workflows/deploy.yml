@@ -1,0 +1,36 @@
+name: Deploy to VPS
+
+on:
+  workflow_run:
+    workflows: ["Create and publish a Docker image"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/wa_llm
+            docker compose -f docker-compose.prod.yml pull web-server
+            docker compose -f docker-compose.prod.yml up -d web-server
+
+            sleep 5
+
+            if docker compose -f docker-compose.prod.yml ps web-server | grep -q "Up\|running"; then
+              echo "Deploy successful"
+              docker compose -f docker-compose.prod.yml ps
+            else
+              echo "ERROR: web-server failed to start"
+              docker compose -f docker-compose.prod.yml logs --tail=50 web-server
+              exit 1
+            fi

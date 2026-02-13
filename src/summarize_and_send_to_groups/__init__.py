@@ -33,7 +33,7 @@ async def summarize(
     session: AsyncSession, settings: Settings, group_name: str, messages: list[Message]
 ) -> AgentRunResult[str]:
     agent = Agent(
-        model=settings.model_name,
+        model=settings.generation_model_name,
         # TODO: move to jinja?
         system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
         output_type=str,

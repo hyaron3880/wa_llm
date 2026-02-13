@@ -13,6 +13,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "pgvector>=0.3.6",
     "pydantic-ai>=1.0.15",
+    "pydantic-ai-slim[openrouter]>=1.0.15",
     "pydantic-settings>=2.7.1",
     "pydantic>=2.6.1",
     "sqlalchemy[asyncio]>=2.0.37",
@@ -21,6 +22,8 @@ dependencies = [
     "uvicorn>=0.34.0",
     "voyageai>=0.3.2",
     "gowa>=0.1.0",
+    "tavily-python>=0.5.0",
+    "firecrawl-py>=1.0.0",
 ]
 
 [dependency-groups]

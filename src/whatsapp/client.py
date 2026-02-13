@@ -16,6 +16,13 @@ class WhatsAppClient(GoWaClient):
         if self._jid:
             return self._jid
 
+        if self.device_id:
+            info = await self.get_device(self.device_id)
+            device_jid = info.results.get("jid") if info.results else None
+            if device_jid:
+                self._jid = parse_jid(device_jid)
+                return self._jid
+
         info = await self.get_devices()
         if not info.results:
             raise ValueError("No devices found")

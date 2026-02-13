@@ -55,6 +55,11 @@ def MockAgent(return_value: Any):
     return mock
 
 
+def _noop_decorator(func):
+    """No-op decorator to replace Agent.tool_plain in tests."""
+    return func
+
+
 @pytest.mark.asyncio
 async def test_router_ask_question_route(
     mock_session: AsyncSessionMock,
@@ -93,6 +98,7 @@ async def test_router_ask_question_route(
 
     monkeypatch.setattr(Agent, "__init__", mock_agent_init)
     monkeypatch.setattr(Agent, "run", mock_agent_run)
+    monkeypatch.setattr(Agent, "tool_plain", _noop_decorator)
 
     # Mock session.exec() to handle all database queries
     def mock_exec_side_effect(*args, **kwargs):
@@ -169,6 +175,7 @@ async def test_router_summarize_route(
 
     monkeypatch.setattr(Agent, "__init__", mock_agent_init)
     monkeypatch.setattr(Agent, "run", mock_agent_run)
+    monkeypatch.setattr(Agent, "tool_plain", _noop_decorator)
 
     # Mock session.exec() for message history
     mock_exec = AsyncMock()
@@ -204,10 +211,52 @@ async def test_router_other_route(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # Mock the Agent class
-    mock_agent = MockAgent(Intent(intent=IntentEnum.other))
-    monkeypatch.setattr(Agent, "__init__", lambda *args, **kwargs: None)
-    monkeypatch.setattr(Agent, "run", mock_agent.run)
+    # "other" now routes to ask_knowledge_base (same as ask_question)
+    mock_route_agent = MockAgent(Intent(intent=IntentEnum.other))
+    mock_rephrasing_agent = MockAgent("rephrased question")
+    mock_generation_agent = MockAgent("I can help with that")
+
+    agents = {
+        "route": mock_route_agent,
+        "rephrase": mock_rephrasing_agent,
+        "generate": mock_generation_agent,
+    }
+    agent_counter = 0
+
+    def mock_agent_init(*args, **kwargs):
+        nonlocal agent_counter
+        return None
+
+    def mock_agent_run(*args, **kwargs):
+        nonlocal agent_counter
+        agent = list(agents.values())[agent_counter]
+        agent_counter = (agent_counter + 1) % len(agents)
+        return agent.run(*args, **kwargs)
+
+    monkeypatch.setattr(Agent, "__init__", mock_agent_init)
+    monkeypatch.setattr(Agent, "run", mock_agent_run)
+    monkeypatch.setattr(Agent, "tool_plain", _noop_decorator)
+
+    def mock_exec_side_effect(*args, **kwargs):
+        mock_result = AsyncMock()
+        mock_result.all = Mock(return_value=[])
+        mock_result.first = Mock(return_value=None)
+        mock_result.__aiter__ = AsyncMock(return_value=iter([]))
+        return mock_result
+
+    mock_session.exec.side_effect = mock_exec_side_effect
+    mock_session.get = AsyncMock(return_value=None)
+    mock_session.add = AsyncMock()
+    mock_session.flush = AsyncMock()
+
+    mock_execute_result = MagicMock()
+    mock_execute_result.fetchall.return_value = []
+    mock_session.execute = AsyncMock(return_value=mock_execute_result)
+
+    mock_nested = AsyncMock()
+    mock_nested.__aenter__ = AsyncMock(return_value=mock_nested)
+    mock_nested.__aexit__ = AsyncMock(return_value=None)
+    mock_session.begin_nested = Mock(return_value=mock_nested)
 
     # Set up mock response for send_message
     mock_response = AsyncMock()
@@ -220,7 +269,7 @@ async def test_router_other_route(
     # Test the route
     await router(test_message)
 
-    # Verify the default response message was sent
+    # Verify conversational response was sent (not a dead-end canned message)
     mock_whatsapp.send_message.assert_called_once()
 
 
@@ -279,6 +328,7 @@ async def test_router_summarize_with_opt_out(
 
     monkeypatch.setattr(Agent, "__init__", mock_agent_init)
     monkeypatch.setattr(Agent, "run", mock_agent_run)
+    monkeypatch.setattr(Agent, "tool_plain", _noop_decorator)
 
     # Mock session.exec() for message history
     mock_exec = AsyncMock()

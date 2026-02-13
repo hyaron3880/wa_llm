@@ -6,11 +6,11 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 import logging
-import logfire
 
 from api import load_new_kbtopics_api, status, summarize_and_send_to_group_api, webhook
 import models  # noqa
 from config import get_settings
+from load_new_kbtopics import topicsLoader
 from whatsapp import WhatsAppClient
 from whatsapp.init_groups import gather_groups
 from voyageai.client_async import AsyncClient
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
         settings.whatsapp_host,
         settings.whatsapp_basic_auth_user,
         settings.whatsapp_basic_auth_password,
+        device_id=settings.whatsapp_device_id,
     )
 
     if settings.db_uri.startswith("postgresql://"):
@@ -45,10 +46,22 @@ async def lifespan(app: FastAPI):
         pool_recycle=600,
         future=True,
     )
-    logfire.instrument_sqlalchemy(engine)
+    if settings.logfire_token:
+        import logfire
+
+        logfire.instrument_sqlalchemy(engine)
     async_session = async_sessionmaker(
         engine, expire_on_commit=False, class_=AsyncSession
     )
+
+    # Assign all state before starting background tasks
+    app.state.db_engine = engine
+    app.state.async_session = async_session
+    app.state.embedding_client = AsyncClient(
+        api_key=settings.voyage_api_key, max_retries=settings.voyage_max_retries
+    )
+
+    logger = logging.getLogger(__name__)
 
     async def sync_groups_on_startup() -> None:
         async with async_session() as session:
@@ -59,27 +72,47 @@ async def lifespan(app: FastAPI):
                 await session.rollback()
                 raise
 
-    asyncio.create_task(sync_groups_on_startup())
+    async def periodic_topic_loader() -> None:
+        """Load new KB topics every 6 hours."""
+        while True:
+            await asyncio.sleep(6 * 3600)
+            try:
+                async with async_session() as session:
+                    loader = topicsLoader()
+                    await loader.load_topics_for_all_groups(
+                        session,
+                        app.state.embedding_client,
+                        app.state.whatsapp,
+                    )
+                logger.info("Scheduled topic load completed")
+            except Exception as e:
+                logger.error(f"Scheduled topic load failed: {e}", exc_info=True)
 
-    app.state.db_engine = engine
-    app.state.async_session = async_session
-    app.state.embedding_client = AsyncClient(
-        api_key=settings.voyage_api_key, max_retries=settings.voyage_max_retries
-    )
+    asyncio.create_task(sync_groups_on_startup())
+    topic_loader_task = asyncio.create_task(periodic_topic_loader())
+
     try:
         yield
     finally:
+        topic_loader_task.cancel()
+        try:
+            await topic_loader_task
+        except asyncio.CancelledError:
+            pass
         await engine.dispose()
 
 
 # Initialize FastAPI app
 app = FastAPI(title="Webhook API", lifespan=lifespan)
 
-logfire.configure()
-logfire.instrument_pydantic_ai()
-logfire.instrument_fastapi(app)
-logfire.instrument_httpx(capture_all=True)
-logfire.instrument_system_metrics()
+if get_settings().logfire_token:
+    import logfire
+
+    logfire.configure()
+    logfire.instrument_pydantic_ai()
+    logfire.instrument_fastapi(app)
+    logfire.instrument_httpx(capture_all=True)
+    logfire.instrument_system_metrics()
 
 
 app.include_router(webhook.router)

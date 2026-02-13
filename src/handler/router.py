@@ -18,6 +18,7 @@ from whatsapp import WhatsAppClient
 from config import Settings
 from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
+from tools.image_analysis import analyze_image
 
 
 # Creating an object
@@ -34,10 +35,10 @@ class IntentEnum(str, Enum):
 class Intent(BaseModel):
     intent: IntentEnum = Field(
         description="""The intent of the message.
-- summarize: Summarize TODAY's chat messages, or catch up on the chat messages FROM TODAY ONLY. This will trigger the summarization of the chat messages. This is only relevant for queries about TODDAY chat. A query across a broader timespan is classified as ask_question
-- ask_question: Ask a question or learn from the collective knowledge of the group. This will trigger the knowledge base to answer the question.
+- summarize: Summarize TODAY's chat messages, or catch up on the chat messages FROM TODAY ONLY. This will trigger the summarization of the chat messages. This is only relevant for queries about TODAY's chat. A query across a broader timespan is classified as ask_question
+- ask_question: Ask a question or learn from the collective knowledge of the group. This also handles real-time questions like weather, news, URLs, time/date - the agent has tools for these.
 - about: Learn about me(bot) and my capabilities. This will trigger the about section.
-- other:  something else. This will trigger the default response."""
+- other: Completely unintelligible or empty input. Almost never used."""
     )
 
 
@@ -59,16 +60,23 @@ class Router(BaseHandler):
         if not message.text:
             return
 
-        route = await self._route(message.text)
-        match route:
-            case IntentEnum.summarize:
-                await self.summarize(message)
-            case IntentEnum.ask_question:
-                await self.ask_knowledge_base(message)
-            case IntentEnum.about:
-                await self.about(message)
-            case IntentEnum.other:
-                await self.default_response(message)
+        try:
+            route = await self._route(message.text)
+            match route:
+                case IntentEnum.summarize:
+                    await self.summarize(message)
+                case IntentEnum.ask_question:
+                    await self.ask_knowledge_base(message)
+                case IntentEnum.about:
+                    await self.about(message)
+                case IntentEnum.other:
+                    await self.ask_knowledge_base(message)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+            await self.send_message(
+                message.chat_jid,
+                "סליחה, משהו השתבש. נסו שוב 🙏",
+            )
 
     async def _route(self, message: str) -> IntentEnum:
         agent = Agent(
@@ -79,6 +87,32 @@ class Router(BaseHandler):
 
         result = await agent.run(message)
         return result.output.intent
+
+    async def analyze_image(
+        self,
+        message: Message,
+        image_bytes: bytes,
+        prompt: str,
+        mime_type: str = "image/jpeg",
+    ):
+        """Analyze an image and send the result back to the chat."""
+        try:
+            result = await analyze_image(
+                image_bytes, prompt, self.settings.generation_model_name, mime_type
+            )
+            if result:
+                await self.send_message(message.chat_jid, result)
+            else:
+                await self.send_message(
+                    message.chat_jid,
+                    "סליחה, לא הצלחתי לנתח את התמונה. נסו שוב 🙏",
+                )
+        except Exception as e:
+            logger.error(f"Image analysis failed: {e}", exc_info=True)
+            await self.send_message(
+                message.chat_jid,
+                "סליחה, משהו השתבש בניתוח התמונה. נסו שוב 🙏",
+            )
 
     async def summarize(self, message: Message):
         time_24_hours_ago = datetime.now() - timedelta(hours=24)
@@ -98,7 +132,7 @@ class Router(BaseHandler):
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
 
         agent = Agent(
-            model=self.settings.model_name,
+            model=self.settings.generation_model_name,
             system_prompt=prompt_manager.render("summarize.j2"),
             output_type=str,
         )
@@ -112,19 +146,24 @@ class Router(BaseHandler):
         await self.send_message(
             message.chat_jid,
             response.output,
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
         )
 
     async def about(self, message):
         await self.send_message(
             message.chat_jid,
-            "I'm an open-source bot created for the GenAI Israel community - https://llm.org.il.\nI can help you catch up on the chat messages and answer questions based on the group's knowledge.\nPlease send me PRs and star me at https://github.com/ilanbenb/wa_llm ⭐️",
-            # in_reply_to=message.message_id,
+            (
+                "היי! אני הבוט של עומר 👋\n"
+                "הנה מה שאני יודע לעשות:\n"
+                "📝 *סיכום שיחות* - סיכום הודעות הצ'אט מהיום\n"
+                "❓ *מענה על שאלות* - מבסיס הידע של הקבוצה\n"
+                "🔍 *חיפוש באינטרנט* - חדשות ומידע עדכני\n"
+                "🌤️ *מזג אוויר* - בכל מיקום בעולם\n"
+                "🎤 *תמלול הודעות קוליות* - תגיבו להודעה קולית ותתייגו אותי\n"
+                "🖼️ *ניתוח תמונות* - שלחו תמונה ותתייגו אותי\n"
+                "🔗 *סיכום קישורים* - שלחו לינק ותבקשו סיכום\n"
+                "⏰ *שעה ותאריך* - מה השעה עכשיו\n\n"
+                "תייגו אותי עם שאלה ואנסה לעזור!"
+            ),
         )
 
-    async def default_response(self, message):
-        await self.send_message(
-            message.chat_jid,
-            "I'm sorry, but I dont think this is something I can help with right now 😅.\n I can help catch up on the chat messages or answer questions based on the group's knowledge.",
-            # in_reply_to=message.message_id,
-        )

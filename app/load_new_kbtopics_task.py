@@ -1,7 +1,7 @@
 import asyncio
 import logging
+import os
 import httpx
-import logfire
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,10 +27,13 @@ async def main():
         datefmt="%Y-%m-%d %H:%M:%S",
         level=logging.DEBUG,
     )
-    logfire.configure()
-    logfire.instrument_pydantic_ai()
-    logfire.instrument_httpx(capture_all=True)
-    logfire.instrument_system_metrics()
+    if os.environ.get("LOGFIRE_TOKEN"):
+        import logfire
+
+        logfire.configure()
+        logfire.instrument_pydantic_ai()
+        logfire.instrument_httpx(capture_all=True)
+        logfire.instrument_system_metrics()
 
     try:
         # Create an async HTTP client and forward the message

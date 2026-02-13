@@ -26,20 +26,29 @@ class Settings(BaseSettings):
     whatsapp_host: str
     whatsapp_basic_auth_password: Optional[str] = None
     whatsapp_basic_auth_user: Optional[str] = None
+    whatsapp_device_id: Optional[str] = None
 
-    anthropic_api_key: str
+    openrouter_api_key: str
 
     # Voyage settings
     voyage_api_key: str
     voyage_max_retries: int = 5
 
     # Model settings
-    model_name: str = "anthropic:claude-sonnet-4-5-20250929"
+    model_name: str = "openrouter:google/gemini-2.5-flash-lite"
+    generation_model_name: str = "openrouter:google/gemini-2.5-flash"
+
+    # Whisper ASR settings
+    whisper_host: str = "http://whisper:9000"
+
+    # Web tools API keys (optional)
+    tavily_api_key: Optional[str] = None
+    firecrawl_api_key: Optional[str] = None
 
     # Direct Message settings
     dm_autoreply_enabled: bool = False
     dm_autoreply_message: str = (
-        "Hello, I am not designed to answer to personal messages."
+        "שלום, אני לא מתוכנן לענות להודעות אישיות."
     )
 
     # QA tester settings (user JIDs allowed to use /kb_qa command)
@@ -51,7 +60,7 @@ class Settings(BaseSettings):
     # Optional settings
     debug: bool = False
     log_level: str = "INFO"
-    logfire_token: str
+    logfire_token: Optional[str] = None
 
     @field_validator("qa_testers")
     @classmethod
@@ -104,8 +113,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def apply_env(self) -> Self:
-        if self.anthropic_api_key:
-            environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
+        if self.openrouter_api_key:
+            environ["OPENROUTER_API_KEY"] = self.openrouter_api_key
 
         if self.logfire_token:
             environ["LOGFIRE_TOKEN"] = self.logfire_token
