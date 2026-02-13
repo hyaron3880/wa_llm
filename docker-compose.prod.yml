@@ -14,7 +14,7 @@ services:
     restart: always
 
   web-server:
-    image: ghcr.io/ilanbenb/wa_llm:latest
+    image: ghcr.io/hyaron3880/wa_llm:latest
     env_file:
       - .env.prod
     ports:
